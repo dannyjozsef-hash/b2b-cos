@@ -42,4 +42,4 @@ Reach out to Danny. Changes are made in Cowork and apply automatically — no co
 Reply in thread to any report in #b2b-cos. The Feedback Review will pick it up on Friday and propose it to Danny.
 
 **For full technical details:**
-See [b2b-cos-automation-playbook.md](./b2b-cos-automation-playbook.md) — it has every channel ID, metric formula, formatting rule, and architecture diagram needed to fully reproduce the system.
+See [b2b-cos-automation-playbook.md]([./b2b-cos-automation-playbook.md](https://github.com/dannyjozsef-hash/b2b-cos/blob/main/Add%20%23b2b-cos%20automation%20playbook)) — it has every channel ID, metric formula, formatting rule, and architecture diagram needed to fully reproduce the system.
