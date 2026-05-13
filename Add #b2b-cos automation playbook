@@ -1,0 +1,449 @@
+# #b2b-cos Automation Playbook
+
+Complete reference for every automated report posted to the **#b2b-cos** Slack channel.  
+Last updated: May 2026 | Owner: Danny Jozsef ([@danny.jozsef](mailto:danny.jozsef@nubank.com.br))
+
+---
+
+## Overview
+
+Five automated reports run on #b2b-cos. Four are powered by **Claude Cowork** (Anthropic's LLM agent platform) and post as Danny's Slack account. One is a standalone **Python/Databricks** job that posts via the **NuPay Update Bot**.
+
+| Report | Cadence | Time (BRT) | Sender | Channel(s) |
+|---|---|---|---|---|
+| [Merchant Monitor](#1-b2b-merchant-monitor) | Weekdays | 09:30 | NuPay Update Bot | #b2b-cos |
+| [Daily Digest](#2-b2b-daily-digest) | Weekdays | 19:00 | Danny (via Claude) | #b2b-cos |
+| [Top of Mind](#3-b2b-top-of-mind) | Every Monday | 09:32 | Danny (via Claude) | #b2b-cos |
+| [M-Team Update](#4-b2b-m-team-update) | 4th Monday/month | 09:35 | Danny (via Claude) | #b2b-cos + #b2b-announcements |
+| [Feedback Review](#5-b2b-feedback-review) | Every Friday | 17:00 | Claude (private DM) | DM to Danny only |
+
+---
+
+## Shared Config
+
+**Standing instructions (source of truth):** All four Claude Cowork tasks read a single Google Drive file at startup. This file contains persistent formatting preferences, rules, and structural notes that override the task's default prompt. Any approved change from the feedback loop is applied here first, then picked up automatically by all tasks on the next run.
+
+- Google Drive file ID: `1nhgIPfLN1xj52r6cx8RLZ4AD1klzJYt5uB-QPl_-UiU`
+
+**Slack auth guard:** All four Claude tasks begin with a 1-message read of #b2b-cos as a connectivity test. If Slack authentication is broken, the task creates a Gmail draft to `danny.jozsef@nubank.com.br` with subject `[ALERT] <Task Name> — Slack reconnection needed` and exits immediately without posting.
+
+---
+
+## 1. B2B Merchant Monitor
+
+**Type:** Python script on Databricks  
+**Cadence:** Every weekday, 09:30 BRT  
+**Posts to:** #b2b-cos  
+**Sender:** NuPay Update Bot (Slack user ID: `U0B07DW06LC`)
+
+### What it shows
+
+One block per merchant (Uber, iFood, 99, Amazon), formatted as a Slack code block:
+
+```
+*Uber*
+```
+TPV (dia)   R$14,4M
+Txns        907,2K
+Avg         R$15,85
+
+SoC crédito 32,1% (D-4)
+
+NuPay Mix   Créd 53,6%  Déb 46,4%  Créd+J 0,0%
+
+WoW   TPV (7d) +6,6%   Txns +1,5%
+MoM   TPV (7d) +1,8%   Txns +0,1%
+```
+```
+
+**Metric definitions:**
+
+| Metric | Definition | Data lag |
+|---|---|---|
+| TPV (dia) | Total Payment Volume in R$ for the reference date | D-2 |
+| Txns | Total transaction count | D-2 |
+| Avg | Average ticket = TPV / Txns | D-2 |
+| SoC crédito | NuPay credit txns / (credit card + NuPay credit + NuPay credit w/ interest) | D-4 |
+| NuPay Mix — Créd % | Share of NuPay transactions paid via NuPay credit (no interest) | D-2 |
+| NuPay Mix — Déb % | Share paid via NuPay debit (Pix) | D-2 |
+| NuPay Mix — Créd+J % | Share paid via NuPay credit with interest (PCJ/PSJ) | D-2 |
+| WoW TPV/Txns (7d) | % change: rolling 7d ending on reference date vs prior 7d | D-2 |
+| MoM TPV/Txns (7d) | % change: rolling 7d ending on reference date vs same 7d one month prior | D-2 |
+
+**SoC crédito formula (exact):**
+```
+SoC = nupay_credit_txns / (credit_card_txns + nupay_credit_txns + nupay_credit_interest_txns)
+```
+Calculated at `grouped_merchant_name` level for the reference date. The `payment_method = 'not_settled'` rows are excluded from all denominators before calculation.
+
+### Data source
+
+- **Table:** `nupay_merchants_transactions_agg`  
+- **Workspace:** Databricks, `nubank-e2-general`
+- **Merchant dimension:** always use `grouped_merchant_name`, never `merchant_name` (which has inconsistent variants)
+- **D-2 fallback logic:** At 09:30 BRT, D-1 data is often still incomplete. The script checks whether the most recent complete date equals `CURRENT_DATE - 1`; if so, it treats it as suspect and falls back to `CURRENT_DATE - 2`. The SoC metric uses D-4 because credit classification data takes longer to settle. Both lags are labeled explicitly in the output.
+
+### Architecture
+
+```
+[Databricks: nupay_merchants_transactions_agg]
+          ↓
+[Python script: query → compute metrics → format Slack message]
+          ↓
+[Databricks Workflow: scheduled job, weekdays 09:30 BRT]
+          ↓
+[Slack Webhook URL — stored as Databricks secret, never hardcoded]
+          ↓
+[NuPay Update Bot posts to #b2b-cos]
+```
+
+All secrets (webhook URL, DB credentials) are stored in Databricks secrets. The Python script holds zero hardcoded credentials.
+
+**Failure behavior:** If the Databricks job fails, no message is posted — silence equals failure. The job owner receives a Databricks failure email notification. There is no fallback Slack alert.
+
+### Formatting rules
+
+- All numbers use Brazilian notation: comma as decimal separator, period as thousands separator (e.g., `R$14,4M`, `907,2K`, `32,1%`).
+- The merchant brand label (`*Brand*`) must be on its own line, separate from the opening triple-backtick. Putting both on the same line breaks Slack rendering.
+
+Correct:
+```
+*iFood*
+```
+TPV (dia) ...
+```
+```
+
+### Feedback mechanism
+
+Anyone in #b2b-cos can reply to a monitor message in thread. Structural feedback (format changes, new fields, methodology questions) is reviewed by the weekly [Feedback Review task](#5-b2b-feedback-review) and proposed to Danny as standing instruction updates.
+
+---
+
+## 2. B2B Daily Digest
+
+**Type:** Claude Cowork scheduled task  
+**Cadence:** Every weekday, ~19:00 BRT  
+**Posts to:** #b2b-cos  
+**Sender:** Danny's Slack account (via Claude Slack MCP)  
+**Condition:** Only posts if ≥ 3 notable items are found across all channels.
+
+### Source channels scanned (last 24 hours)
+
+**Priority — full weight:**
+
+| Channel | ID |
+|---|---|
+| ssops ↔ Nathan | `C07K9J6BV43` |
+| Monthly Business Reviews | `C0A7BAVFZ1C` |
+| Strategic Partnerships | `C0AFMGPK44C` |
+| #b2b-announcements | `C055Q57DHRU` |
+
+**Mixed — surface cross-area and strategic items only:**
+
+| Channel | ID |
+|---|---|
+| Merchant Offers, Ads & Negotiations | `C0ACTEJHFED` |
+| B2B × Marketing | `C05F1NM7CJE` |
+| #b2b-sales | `C04P3419QTC` |
+| #b2b-farming | `C07FHLB70DT` |
+| João Banzato's channel | `C0B19T1K4BA` |
+
+**Operational — only if cross-area or escalation-worthy:**
+
+| Channel | ID |
+|---|---|
+| Sales Enablement Requests | `C07M4MXTXGE` |
+| Sales Machine | `C0A5T8U0W23` |
+| Contracts | `C042L7XPHBQ` |
+| #b2b-merchant-integration | `C04DV8RJTJR` |
+
+### What counts as a "notable item"
+
+- A decision made or announced
+- A milestone reached or go-live confirmed
+- A risk or blocker raised that leadership should know about
+- A cross-area coordination topic
+- A concrete commercial development (deal progress, partnership update, merchant activation)
+
+Does NOT count: casual conversation, FYIs with no action implication, items already covered in that week's Top of Mind, routine operational updates.
+
+### Output format
+
+```
+`B2B Digest` — {Day DD Mon}, 19h
+
+*HIGHLIGHTS* :dart:
+• [Notable item] — <#CHANNEL_ID> (date, time)
+• [Notable item] — <#CHANNEL_ID> (date, time)
+...
+
+*OPERATIONAL RADAR* :construction:
+• [Item] — <#CHANNEL_ID>    ← omit entire section if nothing qualifies
+
+*Sent using @Claude*
+```
+
+Immediately after posting, Claude posts a thread reply with sources:
+
+```
+`Sources`
+• [Author] — <#CHANNEL_ID> ([date, time])
+...
+```
+
+**Rules:** Max 6 items in Highlights, 3 in Operational Radar. The `*Sent using @Claude*` line appears exactly once at the very end. Channel references use `<#CHANNEL_ID>` format (Slack renders as clickable link), never plain text names. All numbers use Brazilian notation.
+
+### João Banzato's channel (C0B19T1K4BA)
+
+Any new posts from João are included as a brief one-liner on what João is looking at or investigating. This channel has dedicated coverage at Mixed priority.
+
+---
+
+## 3. B2B Top of Mind
+
+**Type:** Claude Cowork scheduled task  
+**Cadence:** Every Monday, ~09:32 BRT  
+**Posts to:** #b2b-cos  
+**Sender:** Danny's Slack account (via Claude Slack MCP)
+
+### Source channels scanned (last 7 days)
+
+**Priority — Strategic, full weight:**
+
+| Channel | ID |
+|---|---|
+| ssops ↔ Nathan | `C07K9J6BV43` |
+| Monthly Business Reviews | `C0A7BAVFZ1C` |
+| Strategic Partnerships | `C0AFMGPK44C` |
+| #b2b-announcements | `C055Q57DHRU` |
+| Salesforce / Ília (external consultancy) | `C08KEHQQBEK` |
+
+**Mixed — surface cross-area and strategic items:**
+
+| Channel | ID |
+|---|---|
+| Merchant Offers, Ads & Negotiations | `C0ACTEJHFED` |
+| B2B × Marketing | `C05F1NM7CJE` |
+| #b2b-sales | `C04P3419QTC` |
+| #b2b-farming | `C07FHLB70DT` |
+
+**Operational — cross-area topics only:**
+
+| Channel | ID |
+|---|---|
+| Sales Enablement Requests | `C07M4MXTXGE` |
+| Sales Machine | `C0A5T8U0W23` |
+| Contracts | `C042L7XPHBQ` |
+| #b2b-merchant-integration | `C04DV8RJTJR` |
+
+Before scanning, the task reads the last 30 messages of #b2b-cos to find the previous week's Top of Mind. Items that are unchanged are not repeated.
+
+### Output format
+
+```
+`B2B Top of Mind` — {Day DD Mon}
+
+[One-line framing: the most important strategic focus this week]
+
+*ACTION ITEMS* :white_check_mark:
+• **[Topic]**: [Item] — POC: @name
+• **[Topic]**: [Item] — POC: @name
+...
+
+*ON THE RADAR* :eyes:
+• **[Topic]**: [Item worth watching but no action needed yet]
+...
+
+*Sent using @Claude*
+```
+
+Immediately after posting, Claude posts a thread reply:
+
+```
+`Sources`
+1. **[Topic]** → <#CHANNEL_ID>
+2. **[Topic]** → <#CHANNEL_ID>
+...
+```
+
+**Rules:** Maximum 5–7 action items total. Each action item includes a suggested POC based on who is most active on the topic in the scanned channels. Do not carry over past-sprint closed items — only genuinely open items for the current week. No markdown bold (`**text**`) in the main message body (Slack doesn't render it from clipboard paste). Use `•` as bullet character. Brazilian number notation throughout.
+
+---
+
+## 4. B2B M-Team Update
+
+**Type:** Claude Cowork scheduled task  
+**Cadence:** 4th Monday of each month (runs every Monday; self-guards on day-of-month between 22–28 inclusive)  
+**Posts to:** #b2b-cos **and** #b2b-announcements  
+**Sender:** Danny's Slack account (via Claude Slack MCP)
+
+### Data inputs
+
+**1. OKR tracking spreadsheet**  
+Google Drive file ID: `16a6o_DBYzdn9Rn-fEirO24YRBko06UzkNMY337ABs1c`  
+Current-quarter tab. Extracts:
+
+| Section | KR | Target |
+|---|---|---|
+| Main body | KR7 — Strategic partnerships with ongoing MM benefits | — |
+| Main body | KR8 — Monthly customers engaging with merchant-funded offers | — |
+| Annex | KR8 detail — customers with merchant-funded offers | 3.5M |
+| Annex | KR11 — Merchant-Financed Benefits (MBRL) | R$5.4M |
+| Annex | KR15 — Credit SoC | 32.7% (stretch 34.4%) |
+| Annex | KR17 — NuPay TPV | R$2,373M (stretch R$2,461M) |
+| AI | KR5 — % team using AI 4+ days/week | 100% |
+| AI | KR6 — Deployed AI-first initiatives | 2 (stretch 3) |
+
+Status indicators: 🟢 at or above target | 🟡 within 5% below target | 🔴 more than 5% below target
+
+**2. Previous M-Team update**  
+Google Drive file ID: `1TtIt5yhn2U-YfVQmfNHaFaDkp3HfJPvQf-BQiAZQ4xg`  
+Read to avoid repeating unchanged items and to highlight what has moved.
+
+**3. Slack channels (last 30 days):**
+
+| Channel | ID |
+|---|---|
+| #b2b-announcements | `C055Q57DHRU` |
+| #b2b-sales | `C04P3419QTC` |
+| #b2b-farming | `C07FHLB70DT` |
+| #b2b-merchant-integration | `C04DV8RJTJR` |
+| Sales Machine | `C0A5T8U0W23` |
+| Merchant Offers, Ads & Negotiations | `C0ACTEJHFED` |
+| B2B × Marketing | `C05F1NM7CJE` |
+| #b2b-ai (AI Progress section) | — |
+
+If the OKR sheet returns no data or is inaccessible, the task exits without posting.
+
+### Output format
+
+```
+Hi Folks,
+
+[One-liner hook]
+
+:dart: OKRs
+• KR7 — [name]: [actuals] / [target] 🟢/🟡/🔴
+[1–2 lines context]
+• KR8 — [name]: [actuals] / [target] 🟢/🟡/🔴
+[1–2 lines context]
+
+:bar_chart: KPIs
+→ https://docs.google.com/spreadsheets/d/16a6o_DBYzdn9Rn-fEirO24YRBko06UzkNMY337ABs1c/edit?gid=319043247#gid=319043247
+
+:mega: WHAT HAPPENED
+[4–6 bullets grouped by merchant/area]
+
+:warning: CONCERNS
+[3–6 bullets — specific and operational]
+
+:eyes: WHAT'S NEXT
+[Grouped by area: Strategic Partnerships, Advantages Tab, Farming, Hunting, Travel]
+
+:robot_face: AI PROGRESS
+• KR5 — % team using AI 4+ days/week: [X]% / 100% 🟢/🟡/🔴
+• KR6 — Deployed AI-first initiatives: [X] / 2 🟢/🟡/🔴
+[1–2 lines narrative]
+
+:paperclip: ANNEX
+• Customers with merchant-funded offers: [X]M / 3,5M
+• MBRL: R$[X]M / R$5,4M
+• Credit SoC: [X]% / 32,7%
+• PCJ Coverage: [X]% / [target]%
+• NuPay TPV: R$[X]M / R$2.373M
+```
+
+**Tone rules:** Opening always "Hi Folks,". Section headers: emoji + ALL CAPS. No `*bold*` in section headers. Bullet character: `•`. Numbers everywhere — red/amber flags reported honestly with no individual attribution. Brazilian number notation throughout.
+
+---
+
+## 5. B2B Feedback Review
+
+**Type:** Claude Cowork scheduled task  
+**Cadence:** Every Friday, ~17:00 BRT  
+**Posts to:** Private DM to Danny only (never to #b2b-cos)  
+**Sender:** Claude (via Slack MCP, DM to Danny's user ID `U01JEEX0XHU`)
+
+### What it does
+
+Every Friday the task reads the last 50 messages in #b2b-cos, finds the most recent post of each report type (Merchant Monitor, Top of Mind, Daily Digest, M-Team Update), reads any thread replies on those posts, and classifies each reply as:
+
+- **STRUCTURAL** — a recurring theme, explicit format change, data field to always add/remove, or standing rule that should apply to every future run.
+- **ONE-OFF** — a correction to a specific post, comment about a specific week, praise without actionable change.
+
+Only STRUCTURAL items are surfaced. Items already present in the standing instructions Google Drive file are filtered out.
+
+### Output (when proposals found)
+
+```
+:brain: *B2B CoS — Weekly Feedback Review*
+_Here is what I found in #b2b-cos threads this week that seems worth making permanent in the standing instructions:_
+
+*[Report type]*
+1. [Feedback item] — from @name ([date])
+   → Suggested addition: "[exact text to add to standing instructions]"
+
+*[Report type]*
+2. ...
+
+_To apply these, open Cowork and say "approve items 1, 3" (or "approve all"). I'll update the standing instructions in Google Drive automatically — no manual editing needed._
+```
+
+### Output (when nothing new found)
+
+```
+:brain: *B2B CoS — Weekly Feedback Review*
+Nothing new to add to the standing instructions this week. All thread feedback was either one-off or already covered.
+```
+
+### Approval flow
+
+Danny receives the DM, opens a Cowork session, and says "approve items X" or "approve all". Claude then updates the Google Drive standing instructions file and, if needed, updates the relevant task prompts. No manual editing of the Drive file or task configs is required.
+
+A local convenience copy of pending proposals is written to `feedback-pending.md` during each Friday run. It is overwritten every week (no accumulation of old proposals).
+
+---
+
+## How to reproduce from scratch
+
+### Merchant Monitor
+
+1. Access Databricks workspace `nubank-e2-general`.
+2. Ensure the table `nupay_merchants_transactions_agg` is available with fields: `grouped_merchant_name`, `grouped_payment_method`, `payment_method`, `reference_date`, and the relevant volume/transaction fields.
+3. Store the NuPay Update Bot Slack webhook URL as a Databricks secret.
+4. Write a Python script that:
+   - Queries the table for the 4 merchants (Uber, iFood, 99, Amazon) using `grouped_merchant_name`.
+   - Excludes `payment_method = 'not_settled'` from all denominators.
+   - Applies the D-2 fallback: if the most recent complete date = `CURRENT_DATE - 1`, use `CURRENT_DATE - 2` instead.
+   - Computes SoC crédito at D-4 using the exact formula above.
+   - Formats the output as a Slack message using Brazilian notation.
+   - Posts via the webhook URL from Databricks secrets.
+5. Schedule as a Databricks Workflow, Monday–Friday, 09:30 BRT.
+
+### Claude Cowork tasks (Daily Digest, Top of Mind, M-Team Update, Feedback Review)
+
+1. Open **Cowork** (Claude desktop app, Cowork mode).
+2. Connect the **Slack** and **Google Drive** MCP connectors in Cowork Settings.
+3. Create a new Scheduled Task with the prompt from the relevant section above.
+4. Set the cron schedule (all times in local/BRT):
+   - Daily Digest: `0 19 * * 1-5`
+   - Top of Mind: `30 9 * * 1`
+   - M-Team Update: `30 9 * * 1` (self-guards on 4th Monday)
+   - Feedback Review: `0 17 * * 5`
+5. Run the task once manually ("Run now") to pre-approve all tool permissions. Without this step, future runs may pause on permission prompts.
+6. Create the standing instructions file in Google Drive and note its file ID. Add a Step 0 to each task that reads this file with `read_file_content`.
+
+**Important:** Claude Cowork tasks post as the authenticated Slack account (the account whose token is connected in Cowork Settings). There is currently no way to override the sender to a bot account from within Cowork — that capability is specific to the Merchant Monitor architecture (Databricks + webhook + dedicated bot token).
+
+---
+
+## Contacts & ownership
+
+| Item | Owner |
+|---|---|
+| All Claude Cowork tasks | Danny Jozsef |
+| Standing instructions Drive file | Danny Jozsef |
+| Merchant Monitor Databricks job | Matheus Vieira / Marilia Peralta (SoC methodology aligned with both) |
+| NuPay Update Bot Slack app | Danny Jozsef |
+| NuPay Update Bot Slack webhook | Stored as Databricks secret |
